@@ -2,7 +2,7 @@
   "name": "routing.js",
   "version": "1.0.0",
   "description": "GTFS routing in the browser #dbhackathon",
-  "main": "bin/extract.js",
+  "main": "src/extract.js",
   "bin": {
     "routing.js": "extract.js"
   },
