@@ -6,15 +6,149 @@ const walkingSpeed = 3.0 / 3600;
 const transfer = 10 * 60;
 const dayZero = (new Date('1.1.2000')).getTime();
 
-module.exports = GTFS;
+module.exports = TransitSchedule;
+/**
+ * Represents a transit schedule, which can be created by loading from a directory 
+ *  of GTFS files, or by reloading a cached internal schedule object. 
+ * @constructor  
+ * @param {string|object} filepathOrObject 
+ * @param {Date} startDate 
+ */
+function TransitSchedule(filepathOrObject, startDate) {
+	var data;
+	if (typeof filepathOrObject === "string") {
+		data = loadGtfsData(filepathOrObject, startDate) 
+	}
+	else if (typeof filepathOrObject === "object"){
+		data = filepathOrObject;
+	}
 
-function GTFS(path, startDate) {
-	var me = this;
+    /**
+     * Returns the internal schedule structure. This interface (currently) is not assumed to be backwards 
+     *  compatible and should be used for caching only
+     * @method
+     */
+	this.dumpSchedule = function () {
+		return data;
+	}
 
+    /**
+     * Returns list of steps taken on a transit route
+     * Below is an example of a recent returned object. This interface is not guaranteed to be 
+     * backwards compatible until a later version.
+     * 
+     * @method
+     * @param {object} start Contains {lon: xxx.xxxx, lat: xxx.xxxx} coordinates
+     * @param {object} end Contains {lon: xxx.xxxx, lat: xxx.xxxx} coordinates
+     * @param {Date} startTime The time when the route should start
+     * @returns {Array} An array of steps in a route, for example: 
+     * 
+     * { stop_id: '8098160',
+     *   text: 'train ICE 1533 to Berlin Hbf (tief)',
+     *   duration: 6540,
+     *   points: [ [Object], [Object], [Object], [Object] ],
+     *   start: 378720,
+     *   end: 385260 }
+     */
+	this.route = function (start, end, startTime) {
+		var endTime = startTime + 86400;
+
+		data.stops.forEach(function (stop) {
+			stop.arr = [];
+			stop.checked = false;
+			stop.startDistance = Math.sqrt(Math.pow((start.lon - stop.lon) * 71.6, 2.0) + Math.pow((start.lat - stop.lat) * 111.3, 2));
+			stop.endDistance = Math.sqrt(Math.pow((end.lon - stop.lon) * 71.6, 2) + Math.pow((end.lat - stop.lat) * 111.3, 2));
+			stop.endDuration = stop.endDistance / walkingSpeed;
+			var duration = stop.startDistance / walkingSpeed;
+			var time = startTime + duration + transfer;
+			stop.arr = {
+				time: time, history: [{
+					text: 'walk to ' + stop.name,
+					duration: duration,
+					points: [start, stop],
+					start: startTime,
+					end: startTime + duration
+				}]
+			}
+		})
+
+		while (true) {
+			var checkStop = false, minTime = 1e10;
+			data.stops.forEach(function (stop) {
+				if (stop.checked) return;
+				if (minTime > stop.arr.time) {
+					minTime = stop.arr.time;
+					checkStop = stop;
+				}
+			})
+			if (!checkStop) break;
+
+			checkStop.trips.forEach(function (entry) {
+				let trip = entry[0];
+				let index = entry[1];
+				trip.dates.forEach(function (date) {
+					let offset = date * 86400;
+					let depTime = offset + trip.stopDep[index];
+					if (depTime > endTime) return;
+					if (depTime < minTime) return;
+					for (var i = index + 1; i < trip.stopDep.length; i++) {
+						let stop = trip.stops[i];
+						let arrTime = offset + trip.stopArr[i] + transfer;
+						if (arrTime < stop.arr.time) {
+							stop.arr.time = arrTime;
+							stop.arr.history = checkStop.arr.history.slice(0)
+							stop.arr.history.push({
+								text: 'wait',
+								duration: (trip.stopDep[index] + offset) - checkStop.arr.time + transfer,
+							})
+							let points = [];
+							for (var j = index; j <= i; j++)
+								points.push(trip.stops[j]);
+							stop.arr.history.push({
+								stop_id: stop.id,
+								text: 'train ' + trip.route.name + ' to ' + stop.name,
+								duration: trip.stopArr[i] - trip.stopDep[index],
+								points: points,
+								start: trip.stopDep[index] + offset,
+								end: trip.stopArr[i] + offset,
+							})
+						}
+					}
+				})
+			})
+			checkStop.checked = true;
+		}
+
+		let bestTime = Number.MAX_SAFE_INTEGER;
+		let bestStop = false;
+		data.stops.forEach(function (stop) {
+			stop.arr.time += stop.endDuration;
+			stop.arr.history.push({
+				text: 'walk to destination',
+				duration: stop.endDuration,
+				points: [stop, end],
+				end: stop.arr.time
+			});
+			if (bestTime > stop.arr.time) {
+				bestTime = stop.arr.time;
+				bestStop = stop;
+			}
+		})
+
+		return bestStop === false ? null : bestStop.arr.history;
+
+		function sqr(v) {
+			return v * v;
+		}
+	}
+
+	return this;
+}
+
+function loadGtfsData(filepath, startDate) {
 	var raw_data = {};
-
 	formats.forEach(format => {
-		var table = loadGTFSFile(path, format);
+		var table = stageGtfsFile(filepath, format);
 		if (table)
 			raw_data[format.id] = table;
 	});
@@ -167,122 +301,10 @@ function GTFS(path, startDate) {
 		});
 	})
 
-	me.dump = function(path) {
-		fs.writeFileSync('gtfs.json',JSON.stringify(data),'utf8');
-	}
-
-	me.route = function (start, end, startTime) {
-		var endTime = startTime + 86400;
-
-		data.stops.forEach(function (stop) {
-			stop.arr = [];
-			stop.checked = false;
-			stop.startDistance = Math.sqrt(Math.pow((start.lon - stop.lon) * 71.6, 2.0) + Math.pow((start.lat - stop.lat) * 111.3, 2));
-			stop.endDistance = Math.sqrt(Math.pow((end.lon - stop.lon) * 71.6, 2) + Math.pow((end.lat - stop.lat) * 111.3, 2));
-			stop.endDuration = stop.endDistance / walkingSpeed;
-			var duration = stop.startDistance / walkingSpeed;
-			var time = startTime + duration + transfer;
-			stop.arr = {
-				time: time, history: [{
-					text: 'walk to ' + stop.name,
-					duration: duration,
-					points: [start, stop],
-					start: startTime,
-					end: startTime + duration
-				}]
-			}
-		})
-
-		while (true) {
-			var checkStop = false, minTime = 1e10;
-			data.stops.forEach(function (stop) {
-				if (stop.checked) return;
-				if (minTime > stop.arr.time) {
-					minTime = stop.arr.time;
-					checkStop = stop;
-				}
-			})
-			if (!checkStop) break;
-
-			checkStop.trips.forEach(function (entry) {
-				let trip = entry[0];
-				let index = entry[1];
-				trip.dates.forEach(function (date) {
-					let offset = date * 86400;
-					let depTime = offset + trip.stopDep[index];
-					if (depTime > endTime) return;
-					if (depTime < minTime) return;
-					for (var i = index + 1; i < trip.stopDep.length; i++) {
-						let stop = trip.stops[i];
-						let arrTime = offset + trip.stopArr[i] + transfer;
-						if (arrTime < stop.arr.time) {
-							stop.arr.time = arrTime;
-							stop.arr.history = checkStop.arr.history.slice(0)
-							stop.arr.history.push({
-								text: 'wait',
-								duration: (trip.stopDep[index] + offset) - checkStop.arr.time + transfer,
-							})
-							let points = [];
-							for (var j = index; j <= i; j++) 
-								points.push(trip.stops[j]);
-							stop.arr.history.push({
-								stop_id: stop.id,
-								text: 'train ' + trip.route.name + ' to ' + stop.name,
-								duration: trip.stopArr[i] - trip.stopDep[index],
-								points: points,
-								start: trip.stopDep[index] + offset,
-								end: trip.stopArr[i] + offset,
-							})
-						}
-					}
-				})
-			})
-			checkStop.checked = true;
-		}
-
-		let bestTime = Number.MAX_SAFE_INTEGER;
-		let bestStop = false;
-		data.stops.forEach(function (stop) {
-			stop.arr.time += stop.endDuration;
-			stop.arr.history.push({
-				text: 'walk to destination',
-				duration: stop.endDuration,
-				points: [stop, end],
-				end: stop.arr.time
-			});
-			if (bestTime > stop.arr.time) {
-				bestTime = stop.arr.time;
-				bestStop = stop;
-			}
-		})
-
-		return bestStop === false ? null : bestStop.arr.history;
-
-		function sqr(v) {
-			return v * v;
-		}
-	}
-
-	function ao2oa(list) {
-		if (list.length === 0) return null;
-		var keys = new Set();
-		list.forEach(
-			entry => Object.keys(entry).forEach(
-				key => keys.add(key)
-			)
-		);
-		var obj = {};
-		Array.from(keys.values()).forEach(key => {
-			obj[key] = list.map(entry => entry.hasOwnProperty(key) ? entry[key] : null);
-		})
-		return obj;
-	}
-	return me;
+	return data;
 }
 
-
-
-function loadGTFSFile(path, format) {
+function stageGtfsFile(path, format) {
 	var filename = path + '/' + format.id + '.txt';
 	try {
 		var data = fs.readFileSync(filename, 'utf8').split(/[\r\n]/);
